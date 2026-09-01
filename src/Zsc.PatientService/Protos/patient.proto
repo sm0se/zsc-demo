@@ -1,0 +1,19 @@
+syntax = "proto3";
+
+option csharp_namespace = "Zsc.PatientService.Grpc";
+
+package patient;
+
+service PatientGrpc {
+  rpc GetPatientSummary (PatientSummaryRequest) returns (PatientSummaryReply);
+}
+
+message PatientSummaryRequest {
+  string patient_id = 1;
+}
+
+message PatientSummaryReply {
+  string patient_id = 1;
+  string display_name = 2;
+  int32 case_count = 3;
+}
