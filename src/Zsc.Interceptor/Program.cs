@@ -1,7 +1,14 @@
-using Zsc.CommonLib.Routing;
+using Zsc.CommonLib.ServiceDiscovery;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
+
+// Configure the discovery client to point to the service discovery service
+var discoveryBaseUrl = builder.Configuration["ServiceDiscovery:BaseUrl"] ?? "http://localhost:5300";
+builder.Services.AddHttpClient<IServiceDiscoveryClient, HttpServiceDiscoveryClient>(client =>
+{
+    client.BaseAddress = new Uri(discoveryBaseUrl);
+});
 
 builder.WebHost.ConfigureKestrel(options =>
 {
@@ -10,31 +17,38 @@ builder.WebHost.ConfigureKestrel(options =>
 
 var app = builder.Build();
 
-// Every inbound ZSC call funnels through here and gets forwarded based on
-// Zsc.CommonLib's hardcoded route map. Notice there's no correlation id
-// generated or propagated on the way through - every hop logs in isolation,
-// which is exactly why tracing a request across services is so hard today.
+// Every inbound ZSC call funnels through here and gets forwarded to the
+// appropriate service resolved from the service discovery registry.
+// Correlation IDs are generated here and propagated downstream.
 app.MapMethods("/api/{service}/{**path}", new[] { "GET", "POST", "PUT", "DELETE" },
     async (string service, string path, HttpRequest request, HttpResponse response,
-           IHttpClientFactory httpClientFactory, ILogger<Program> logger) =>
+           IHttpClientFactory httpClientFactory, IServiceDiscoveryClient discoveryClient, ILogger<Program> logger) =>
     {
-        ServiceRouteEntry entry;
-        try
+        // Generate or extract correlation ID
+        var correlationId = request.Headers.ContainsKey("X-Correlation-Id")
+            ? request.Headers["X-Correlation-Id"].FirstOrDefault() ?? Guid.NewGuid().ToString()
+            : Guid.NewGuid().ToString();
+
+        logger.LogInformation("Forwarding {Method} /{Service}/{Path} [CorrelationId={CorrelationId}]", 
+            request.Method, service, path, correlationId);
+
+        var serviceInfo = await discoveryClient.ResolveAsync(service);
+        if (serviceInfo?.HttpBaseUrl is null)
         {
-            entry = ServiceRouteMap.Resolve(service);
-        }
-        catch (KeyNotFoundException)
-        {
+            logger.LogWarning("Service discovery could not resolve '{Service}' [CorrelationId={CorrelationId}]", 
+                service, correlationId);
             response.StatusCode = StatusCodes.Status502BadGateway;
-            await response.WriteAsync($"Interceptor has no route for '{service}'.");
+            response.Headers.Add("X-Correlation-Id", correlationId);
+            await response.WriteAsync($"Interceptor could not discover '{service}'.");
             return;
         }
 
-        logger.LogInformation("Forwarding {Method} /{Service}/{Path}", request.Method, service, path);
-
         var client = httpClientFactory.CreateClient();
-        var forwardUri = new Uri(new Uri(entry.HttpBaseUrl), $"/{path}{request.QueryString}");
+        var forwardUri = new Uri(new Uri(serviceInfo.HttpBaseUrl), $"/{path}{request.QueryString}");
         var forwardRequest = new HttpRequestMessage(new HttpMethod(request.Method), forwardUri);
+        
+        // Propagate correlation ID
+        forwardRequest.Headers.Add("X-Correlation-Id", correlationId);
 
         if (request.ContentLength is > 0)
         {
@@ -47,6 +61,7 @@ app.MapMethods("/api/{service}/{**path}", new[] { "GET", "POST", "PUT", "DELETE"
         {
             using var upstream = await client.SendAsync(forwardRequest);
             response.StatusCode = (int)upstream.StatusCode;
+            response.Headers.Add("X-Correlation-Id", correlationId);
             if (upstream.Content.Headers.ContentType is { } contentType)
                 response.ContentType = contentType.ToString();
             var body = await upstream.Content.ReadAsByteArrayAsync();
@@ -54,8 +69,9 @@ app.MapMethods("/api/{service}/{**path}", new[] { "GET", "POST", "PUT", "DELETE"
         }
         catch (HttpRequestException ex)
         {
-            logger.LogError(ex, "Failed to reach {Service}", service);
+            logger.LogError(ex, "Failed to reach {Service} [CorrelationId={CorrelationId}]", service, correlationId);
             response.StatusCode = StatusCodes.Status502BadGateway;
+            response.Headers.Add("X-Correlation-Id", correlationId);
             await response.WriteAsync($"Interceptor could not reach '{service}'.");
         }
     });
