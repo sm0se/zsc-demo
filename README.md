@@ -1,60 +1,198 @@
-# ZSC demo — "before" architecture (Requirement #2)
+# ZSC demo — Service Discovery Architecture (Phase 2+)
 
-A synthetic, ZSC-flavored .NET monorepo built to demo Zeiss Requirement #2
-("Simplification of ZSC routing mechanisms from Interceptor to individual
-microservices and removing current common library dependencies") using
-Kenome's kencode product. This is **not** Zeiss's real ZSC codebase — Zeiss
-didn't share it — it's a small, real, compilable stand-in that reproduces the
-same coupling and the same pain points, so a live coding agent has something
-concrete to refactor.
+A synthetic, ZSC-flavored .NET monorepo demonstrating **runtime service discovery** and **distributed correlation IDs**. This is a refactored version demonstrating **complete decoupling** of services from hardcoded routing tables.
 
-## Why a monorepo
+**Key Achievement**: Adding a new microservice requires **ZERO changes** to existing services (BFF, Interceptor, PatientService, CommonLib).
 
-The client's brief names four separate repos (Patient service, BFF,
-Interceptor, Common library). Here they're four separate, real .NET projects
-inside one solution instead of four physically separate repos — same
-coupling story (project-reference graph, not repo boundaries), much simpler
-to operate for a live demo. See `../kencode-zeiss-poc-requirements.md` for
-the full requirement analysis this build is grounded in.
+---
 
-## Layout
+## Architecture Overview
 
-| Project | Role |
-|---|---|
-| `src/Zsc.CommonLib` | Shared library: hardcoded `ServiceRouteMap` (service name → address), shared DTOs, and an `IEventBus` stub for the service-bus transport. **This is the coupling point.** |
-| `src/Zsc.Interceptor` | Edge service. Forwards every inbound call based on `ServiceRouteMap`. No correlation-id propagation — every hop logs in isolation, which is why tracing a request across services is hard today. |
-| `src/Zsc.Bff` | Composes a patient dashboard from two calls made through the Interceptor, deserializing CommonLib's DTOs directly — a compile-time dependency on the shared library. |
-| `src/Zsc.PatientService` | The domain microservice. REST endpoints (get/create patient, history) + one gRPC endpoint (`GetPatientSummary`) + publishes a `PatientUpdated` event through the `IEventBus` stub — HTTP, gRPC, and event-driven, the three transports named in the requirement (R2.6). |
-| `tests/*.Tests` | One xUnit project per `src` project. |
+### The Problem (Phase 1: Before)
+- **Hardcoded routing** in `ServiceRouteMap` (CommonLib)
+- **No correlation IDs**: Each service logs in isolation; no distributed tracing
+- **Tight coupling**: Adding a service meant modifying CommonLib, Interceptor, and BFF
+- **No runtime flexibility**: All routes compiled into binaries
 
-## The pain this reproduces
+### The Solution (Phase 2+: After)
+- **Runtime service registry** (ServiceDiscovery) at port 5300
+- **Self-registration**: Each service registers itself on startup with its address
+- **Correlation ID propagation**: X-Correlation-Id header flows through entire call chain
+- **Zero-change service addition**: New services don't touch existing code
 
-Adding one new API today means touching **CommonLib** (new route entry,
-maybe a new DTO), **Interceptor** (implicitly, since it just forwards by
-route name — but any new cross-cutting behavior lives here), and the
-**individual microservice** — plus the **BFF** if it's consumer-facing. The
-routing table lives in code, shared by project reference; there's no runtime
-registration, no correlation id, and no way to add a service without
-redeploying everything that already depends on `Zsc.CommonLib`.
+---
 
-This is deliberately *not* fixed here — the fix (a service-discovery
-component, name-based resolution, correlation-id propagation) is the live
-coding agent's actual deliverable, not something pre-built into this repo.
+## Components
 
-## Running locally
+| Project | Role | Port |
+|---------|------|------|
+| `src/Zsc.ServiceDiscovery` | Runtime registry for all services | 5300 |
+| `src/Zsc.CommonLib` | Shared DTOs, events, IServiceDiscoveryClient, correlation ID constant | — |
+| `src/Zsc.Interceptor` | Edge gateway; discovers services at runtime; propagates correlation IDs | 5200 |
+| `src/Zsc.Bff` | Composes dashboard from services via Interceptor; includes correlation ID | 5000+ |
+| `src/Zsc.PatientService` | Patient management REST + gRPC; self-registers with discovery | 5101/5102 |
+| `src/Zsc.AuditService` | **[NEW]** Audit log endpoint; proves decoupling works | 5401 |
 
-Requires the .NET 8 SDK (or use the Docker one-liners below — nothing is
-installed on this machine's host).
+---
 
-```bash
-dotnet test                                   # from the repo root
-dotnet run --project src/Zsc.PatientService   # ports 5101 (HTTP), 5102 (gRPC)
-dotnet run --project src/Zsc.Interceptor      # port 5200
-dotnet run --project src/Zsc.Bff              # default Kestrel port
-```
+## Proof of Decoupling: AuditService
 
-Without a local SDK:
+**AuditService** demonstrates that a new microservice can be added **without modifying existing code**.
+
+### What AuditService Does
+- Listens on port 5401
+- Registers with ServiceDiscovery on startup (name: `audit-service`)
+- Exposes `GET /audits/{id}` → dummy audit record
+- Includes correlation ID middleware
+- **Zero changes** to CommonLib, Interceptor, BFF, or PatientService
+
+### Running AuditService
 
 ```bash
-docker run --rm -v "$PWD":/src -w /src mcr.microsoft.com/dotnet/sdk:8.0 dotnet test
+# Terminal 1: Start ServiceDiscovery first
+dotnet run --project src/Zsc.ServiceDiscovery
+
+# Terminal 2: Start AuditService (auto-registers)
+dotnet run --project src/Zsc.AuditService
+
+# Terminal 3: Start Interceptor (discovers & routes)
+dotnet run --project src/Zsc.Interceptor
+
+# Terminal 4: Call through Interceptor by service name
+curl -H "X-Correlation-Id: test-001" \
+  http://localhost:5200/api/audit-service/audits/audit-123
+
+# Response includes correlation ID header
+# Logs in AuditService show: Correlation ID: test-001
 ```
+
+---
+
+## Running Locally
+
+Requires .NET 8 SDK.
+
+### Full Stack (All Services)
+
+```bash
+# Terminal 1: Service Discovery (required first)
+dotnet run --project src/Zsc.ServiceDiscovery
+
+# Terminal 2: Patient Service
+dotnet run --project src/Zsc.PatientService
+
+# Terminal 3: Audit Service (optional, demonstrates decoupling)
+dotnet run --project src/Zsc.AuditService
+
+# Terminal 4: Interceptor
+dotnet run --project src/Zsc.Interceptor
+
+# Terminal 5: BFF
+dotnet run --project src/Zsc.Bff
+```
+
+### Run Tests
+
+```bash
+# All 34 tests (includes new AuditService tests)
+dotnet test
+
+# Specific test suite
+dotnet test tests/Zsc.ServiceDiscovery.Tests
+dotnet test tests/Zsc.AuditService.Tests
+```
+
+### Verify End-to-End with Correlation ID
+
+```bash
+# Start services in background
+dotnet run --project src/Zsc.ServiceDiscovery &
+dotnet run --project src/Zsc.PatientService &
+dotnet run --project src/Zsc.Interceptor &
+dotnet run --project src/Zsc.Bff &
+
+sleep 2
+
+# Call BFF dashboard with correlation ID
+curl -H "X-Correlation-Id: my-trace-123" \
+  http://localhost:5000/api/patients/pat-000001/dashboard
+
+# Check logs for correlation ID appearing in all services
+```
+
+---
+
+## Test Coverage
+
+**34 tests total** (10 original + 24 new), all passing:
+
+| Suite | Tests | Coverage |
+|-------|-------|----------|
+| Zsc.CommonLib.Tests | 3 | ServiceRouteMap (deprecated) |
+| Zsc.ServiceDiscovery.Tests | 8 | Register/resolve endpoints, validation |
+| Zsc.Bff.Tests | 3 | Correlation ID generation/propagation |
+| Zsc.Interceptor.Tests | 9 | Correlation ID + service discovery routing |
+| Zsc.PatientService.Tests | 6 | Endpoints, self-registration |
+| **Zsc.AuditService.Tests** | **3** | **Endpoint, correlation ID, decoupling proof** |
+| **ServiceDiscovery Integration** | **2** | **Service routing via discovery** |
+| **TOTAL** | **34** | **✅ All passing** |
+
+---
+
+## How Correlation IDs Work
+
+Every request gets a unique `X-Correlation-Id`:
+
+```
+Client → BFF (generate/propagate)
+       → Interceptor (propagate)
+       → PatientService (log with ID)
+       ← Response (include ID header)
+```
+
+All services log with correlation ID in their scope, enabling distributed request tracing across the entire call chain.
+
+---
+
+## Acceptance Criteria Met
+
+✅ **Criterion 1**: Service registration is runtime-configurable (ServiceDiscovery)  
+✅ **Criterion 2**: No compile-time route dependency (ServiceRouteMap marked [Obsolete])  
+✅ **Criterion 3**: Concrete proof (AuditService added without modifying others)  
+✅ **Criterion 4**: Correlation ID propagation (end-to-end tracing)  
+✅ **Criterion 5**: All existing tests pass (34/34 passing)
+
+---
+
+## Production Roadmap
+
+### Near Term
+- Replace `InMemoryServiceRegistry` with distributed registry (Consul, etcd, K8s DNS)
+- Add service health checks and heartbeats
+- Implement correlation ID sampling for performance
+
+### Medium Term
+- Distributed tracing integration (Jaeger, Application Insights)
+- Service retry policies
+- Circuit breaker pattern for failing services
+
+### Adding New Services
+To add a new service (following the AuditService pattern):
+
+1. Create project in `src/Zsc.NewService`
+2. Add correlation ID middleware (copy from AuditService)
+3. Add self-registration on startup (copy from AuditService)
+4. Add endpoints and business logic
+5. Create tests in `tests/Zsc.NewService.Tests`
+6. Add to solution file
+
+**Result: No changes needed to CommonLib, Interceptor, BFF, or PatientService.**
+
+---
+
+## References
+
+- **Phase 1**: User story and acceptance criteria for decoupling
+- **Phase 2**: Service discovery implementation + correlation ID propagation
+- **Phase 3**: Comprehensive test coverage (34 tests)
+- **Phase 4**: AuditService proof-of-concept + README documentation

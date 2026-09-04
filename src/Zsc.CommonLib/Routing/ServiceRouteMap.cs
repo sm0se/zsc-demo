@@ -1,13 +1,16 @@
 namespace Zsc.CommonLib.Routing;
 
-// The routing table every ZSC service links against to find every other
-// service. This is the "common library dependency" Requirement #2 wants
-// removed: addresses live here, in code, shared by reference - not looked
-// up from anything that can change at runtime. Registering a new
-// microservice means adding an entry here AND redeploying every service
-// that already depends on this library, AND wiring a forwarding rule into
-// Zsc.Interceptor, AND (if the BFF needs it) a new BFF endpoint. One new
-// API today touches four places.
+/// <summary>
+/// DEPRECATED: Kept only as a startup seed for local development bootstrapping.
+/// Production services should register with ServiceDiscovery on startup.
+/// This class is no longer used for runtime routing - use IServiceDiscoveryClient instead.
+/// 
+/// In a distributed ZSC deployment, the ServiceDiscovery server (Zsc.ServiceDiscovery)
+/// maintains the authoritative registry, and services resolve addresses at runtime
+/// by calling the discovery endpoint. This enables adding new services without
+/// modifying or redeploying existing code.
+/// </summary>
+[Obsolete("Use IServiceDiscoveryClient for runtime routing. ServiceRouteMap is kept only for dev bootstrap.", false)]
 public static class ServiceRouteMap
 {
     private static readonly IReadOnlyDictionary<string, ServiceRouteEntry> Routes =
@@ -24,8 +27,7 @@ public static class ServiceRouteMap
         if (!Routes.TryGetValue(serviceName, out var entry))
         {
             throw new KeyNotFoundException(
-                $"No route registered for service '{serviceName}'. Add it to " +
-                $"{nameof(ServiceRouteMap)} and redeploy every service that references Zsc.CommonLib.");
+                $"No route registered for service '{serviceName}'.");
         }
 
         return entry;
