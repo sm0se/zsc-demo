@@ -38,6 +38,7 @@ app.MapMethods("/api/{service}/{**path}", new[] { "GET", "POST", "PUT", "DELETE"
             logger.LogWarning("Service discovery could not resolve '{Service}' [CorrelationId={CorrelationId}]", 
                 service, correlationId);
             response.StatusCode = StatusCodes.Status502BadGateway;
+            response.Headers.Add("X-Correlation-Id", correlationId);
             await response.WriteAsync($"Interceptor could not discover '{service}'.");
             return;
         }
@@ -60,6 +61,7 @@ app.MapMethods("/api/{service}/{**path}", new[] { "GET", "POST", "PUT", "DELETE"
         {
             using var upstream = await client.SendAsync(forwardRequest);
             response.StatusCode = (int)upstream.StatusCode;
+            response.Headers.Add("X-Correlation-Id", correlationId);
             if (upstream.Content.Headers.ContentType is { } contentType)
                 response.ContentType = contentType.ToString();
             var body = await upstream.Content.ReadAsByteArrayAsync();
@@ -69,6 +71,7 @@ app.MapMethods("/api/{service}/{**path}", new[] { "GET", "POST", "PUT", "DELETE"
         {
             logger.LogError(ex, "Failed to reach {Service} [CorrelationId={CorrelationId}]", service, correlationId);
             response.StatusCode = StatusCodes.Status502BadGateway;
+            response.Headers.Add("X-Correlation-Id", correlationId);
             await response.WriteAsync($"Interceptor could not reach '{service}'.");
         }
     });
