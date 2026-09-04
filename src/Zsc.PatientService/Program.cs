@@ -111,6 +111,22 @@ app.MapPost("/patients/{patientId}/history", async (string patientId, PatientHis
     return Results.Ok(ToDto(patient));
 });
 
+// NEW TRIVIAL API - Added without touching CommonLib, Interceptor, or BFF!
+app.MapGet("/patients/{patientId}/summary", (string patientId, IPatientRepository repo, HttpContext context, ILogger<Program> logger) =>
+{
+    var correlationId = context.Items["CorrelationId"];
+    logger.LogInformation("GET /patients/{PatientId}/summary [CorrelationId={CorrelationId}]", patientId, correlationId);
+    var patient = repo.Get(patientId);
+    if (patient is null) return Results.NotFound();
+
+    return Results.Ok(new
+    {
+        patientId = patient.PatientId,
+        displayName = patient.DisplayName,
+        recentActivities = patient.History.TakeLast(3).Count()
+    });
+});
+
 app.Run();
 
 static PatientDto ToDto(Zsc.PatientService.Models.Patient patient) => new(
