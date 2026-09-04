@@ -2,24 +2,55 @@ using Zsc.CommonLib.Dtos;
 using Zsc.CommonLib.Events;
 using Zsc.PatientService.Data;
 using Zsc.PatientService.Grpc;
+using Zsc.PatientService.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Ports match the hardcoded entry in Zsc.CommonLib.Routing.ServiceRouteMap for
-// "patient-service". Nothing enforces that at build time - if this drifts
-// from the route map, every caller breaks and nobody finds out until a call
-// fails in production.
+var httpPort = int.Parse(builder.Configuration["PatientService:HttpPort"] ?? "5101");
+var grpcPort = int.Parse(builder.Configuration["PatientService:GrpcPort"] ?? "5102");
+var discoveryUrl = builder.Configuration["ServiceDiscovery:Url"] ?? "http://localhost:5300";
+
 builder.WebHost.ConfigureKestrel(options =>
 {
-    options.ListenLocalhost(5101, o => o.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1);
-    options.ListenLocalhost(5102, o => o.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http2);
+    options.ListenLocalhost(httpPort, o => o.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http1);
+    options.ListenLocalhost(grpcPort, o => o.Protocols = Microsoft.AspNetCore.Server.Kestrel.Core.HttpProtocols.Http2);
 });
 
 builder.Services.AddSingleton<IPatientRepository, InMemoryPatientRepository>();
 builder.Services.AddSingleton<IEventBus, InMemoryEventBus>();
 builder.Services.AddGrpc();
+builder.Services.AddHttpClient();
 
 var app = builder.Build();
+
+// Register with service discovery on startup
+using (var scope = app.Services.CreateScope())
+{
+    var logger = scope.ServiceProvider.GetRequiredService<ILogger<Program>>();
+    var httpClientFactory = scope.ServiceProvider.GetRequiredService<IHttpClientFactory>();
+    
+    try
+    {
+        var httpClient = httpClientFactory.CreateClient();
+        var registerRequest = new { httpBaseUrl = $"http://localhost:{httpPort}", grpcAddress = $"http://localhost:{grpcPort}" };
+        var response = await httpClient.PostAsJsonAsync($"{discoveryUrl}/services/patient-service/register", registerRequest);
+        
+        if (response.IsSuccessStatusCode)
+        {
+            logger.LogInformation("Successfully registered patient-service with ServiceDiscovery at {Url}", discoveryUrl);
+        }
+        else
+        {
+            logger.LogWarning("Failed to register patient-service with ServiceDiscovery: {StatusCode}", response.StatusCode);
+        }
+    }
+    catch (Exception ex)
+    {
+        logger.LogWarning(ex, "Error registering patient-service with ServiceDiscovery at {Url}", discoveryUrl);
+    }
+}
+
+app.UseCorrelationId();
 
 app.MapGrpcService<PatientGrpcService>();
 
